@@ -593,7 +593,6 @@ pub const Protocol = struct {
 
     pub fn handleAuthRequest(self: *Self, msg: Message, storage: []u8, params: Params) !void {
         // R
-        _ = self;
         const reader = std.io.fixedBufferStream(msg.data).reader();
         const auth_type = try reader.readIntBig(u32);
         switch (auth_type) {
