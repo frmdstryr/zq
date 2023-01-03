@@ -268,7 +268,6 @@ pub fn Query(
     comptime query_type: QueryType,
     comptime columns: []const Column,
 ) type {
-    _ = T;
     _ = backend;
     return switch (query_type) {
         .create, .drop => RawQuery,
