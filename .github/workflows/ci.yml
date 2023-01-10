@@ -1,15 +1,32 @@
 name: CI
 on: [push]
 jobs:
-  test:
+  test-postgres:
     runs-on: ubuntu-latest
+    env:
+        DATABASE_URL: 'postgres://user:password@localhost:5432/test_zq'
+    services:
+      postgres:
+        image: postgres
+        ports:
+            - 5432:5432
+        env:
+          POSTGRES_USER: user
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: test_zq
+        # Set health checks to wait until postgres has started
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Install dependencies
         run: |
             sudo snap install zig --classic --edge
             zig version
-      - name: Module test
+      - name: Module tests
         run: zig build test
-      - name: Build
-        run: zig build -Drelease-safe=true install
+      - name: App test
+        run: zig build run

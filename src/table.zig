@@ -108,7 +108,20 @@ pub fn createColumn(
 
     if (f.default_value) |value| {
         // On zig 0.10.0
-        if (builtin.zig_version.minor > 9) {
+        if (builtin.zig_version.minor == 10) {
+            const v = @ptrCast(*const f.field_type, value);
+            if (column.optional) {
+                if (v.* == null) {
+                    column.default = "null";
+                } else {
+                    column.default = comptimePrint("{s}", .{v.*.?});
+                }
+            } else if (f.field_type == bool) {
+                column.default = if (v.* == true) "TRUE" else "FALSE";
+            } else {
+                column.default = comptimePrint("{s}", .{v.*});
+            }
+        } else if (builtin.zig_version.minor == 9) {
             const v = @ptrCast(*const f.field_type, value);
             column.default = comptimePrint("{s}", .{v.*});
         } else {
@@ -244,7 +257,7 @@ pub fn Table(comptime T: type, comptime backend: Backend, comptime options: Tabl
 
 test "create-basic" {
     const User = struct {
-        id: ?u32,
+        id: ?i64,
         name: ?[]const u8 = null,
         email: []const u8,
         enabled: bool = true,
@@ -259,20 +272,18 @@ test "create-basic" {
     var fbo = std.io.fixedBufferStream(&buf);
     try q.build(fbo.writer());
     try testing.expectEqualStrings(
-        \\CREATE SEQUENCE users_id_seq;
         \\CREATE TABLE users (
-        \\  id int8 PRIMARY KEY DEFAULT nextval('users_id_seq'),
-        \\  name varchar(100) DEFAULT null,
+        \\  id bigserial PRIMARY KEY,
+        \\  name varchar(100) DEFAULT NULL,
         \\  email varchar(255) NOT NULL,
-        \\  enabled bool NOT NULL DEFAULT true
+        \\  enabled bool NOT NULL DEFAULT TRUE
         \\);
-        \\ALTER SEQUENCE users_id_seq OWNED BY users.id;
     , fbo.getWritten());
 }
 
 test "create-meta" {
     const User = struct {
-        uuid: ?u32,
+        uuid: ?i32,
         name: ?[]const u8 = null,
         email: []const u8,
         enabled: bool = true,
@@ -295,10 +306,10 @@ test "create-meta" {
     try q.build(fbo.writer());
     try testing.expectEqualStrings(
         \\CREATE TABLE users (
-        \\  uuid int8 PRIMARY KEY,
-        \\  name varchar(100) DEFAULT null,
+        \\  uuid serial PRIMARY KEY,
+        \\  name varchar(100) DEFAULT NULL,
         \\  email varchar(255) NOT NULL UNIQUE,
-        \\  enabled bool NOT NULL DEFAULT true
+        \\  enabled bool NOT NULL DEFAULT TRUE
         \\);
     , fbo.getWritten());
 }

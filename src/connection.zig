@@ -6,6 +6,7 @@
 const std = @import("std");
 const Backend = @import("backend.zig").Backend;
 const CursorStatus = @import("cursor.zig").CursorStatus;
+const log = std.log.scoped(.connection);
 
 pub const Option = struct {
     name: []const u8,
@@ -29,6 +30,7 @@ pub fn Connection(comptime backend: Backend) type {
         pub const State = enum { startup, query, function, copy, termination };
         protocol: Protocol,
         state: State = .query,
+        echo: bool = false,
 
         pub fn init(params: Params) !Self {
             return Self{
@@ -41,7 +43,9 @@ pub fn Connection(comptime backend: Backend) type {
         // column headers
         pub fn execute(self: *Self, buffer: []u8, query: []const u8, params: anytype) !Cursor {
             // TODO: Encode query
-            std.log.debug("{s}", .{query});
+            if (self.echo) {
+                log.debug("{s}", .{query});
+            }
             _ = params;
             // TODO: Need to make sure buffer was flushed
             const n = try self.protocol.sendMessage(buffer, 'Q', query);
@@ -75,7 +79,27 @@ pub fn Connection(comptime backend: Backend) type {
             };
         }
 
+        // Execute a string that may contain multiple statments delmited by ;
         pub fn executeQuery(self: *Self, buffer: []u8, query: anytype) !Cursor {
+            var fbo = std.io.fixedBufferStream(buffer);
+            try query.build(fbo.writer());
+            const result_buffer = buffer[fbo.pos..];
+            const statements = fbo.getWritten();
+            var cursor: Cursor = undefined;
+            var start_index: usize = 0;
+            while (std.mem.indexOfPos(u8, statements, start_index, ";")) |pos| {
+                const q = statements[start_index..pos+1];
+                cursor = try self.execute(result_buffer, q, .{});
+                start_index = pos+1;
+            }
+            if (start_index == 0) {
+                return error.IncompleteStatement;
+            }
+            return cursor;
+        }
+
+        // Execute a single statement
+        pub fn executeSingleQuery(self: *Self, buffer: []u8, query: anytype) !Cursor {
             var fbo = std.io.fixedBufferStream(buffer);
             try query.build(fbo.writer());
             const remaining = buffer[fbo.pos..];

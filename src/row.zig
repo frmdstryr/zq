@@ -96,7 +96,7 @@ pub const RowFormatOptions = struct {
     before: []const u8 = "",
     after: []const u8 = "\n",
     format: []const u8 = "{s:<30}", // TODO Support multiple columns here...
-    separator: []const u8 = "| ",
+    separator: []const u8 = " | ",
 };
 
 pub const Header = struct {
@@ -157,16 +157,16 @@ pub const Row = struct {
             const sep = if (i == last) "" else opts.separator;
             switch (v) {
                 DataType.str => |value| {
-                    try out_stream.print(opts.format ++ "{s}", .{ value, sep }); // str
+                    try out_stream.print("{s}{s}", .{ value, sep }); // str
                 },
                 DataType.optional_str => |value| {
-                    try out_stream.print(opts.format ++ "{s}", .{ value, sep }); // opt str
+                    try out_stream.print("{any}{s}", .{ value, sep }); // opt str
                 },
                 DataType.bool => |value| {
-                    try out_stream.print(opts.format ++ "{s}", .{ value, sep }); // bool
+                    try out_stream.print("{any}{s}", .{ value, sep }); // bool
                 },
                 DataType.optional_bool => |value| {
-                    try out_stream.print(opts.format ++ "{s}", .{ value, sep }); // opt bool
+                    try out_stream.print("{any}{s}", .{ value, sep }); // opt bool
                 },
                 DataType.i8 => |value| {
                     try out_stream.print("{d}{s}", .{ value, sep }); // i8
@@ -193,7 +193,7 @@ pub const Row = struct {
                     try out_stream.print("{d}{s}", .{ value, sep }); // u64
                 },
                 else => |value| {
-                    try out_stream.print("{s}{s}", .{ value, sep }); // Default
+                    try out_stream.print("{}{s}", .{ value, sep }); // Default
                 },
             }
         }
