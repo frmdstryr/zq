@@ -198,7 +198,7 @@ pub fn Table(comptime T: type, comptime backend: Backend, comptime options: Tabl
     const fields = std.meta.fieldNames(T);
     const fields_except_pk = &fieldNamesExclude(fields, pk_name);
     comptime var table_columns: [fields.len]Column = undefined;
-    inline for (std.meta.fieldNames(T)) |n, i| {
+    inline for (std.meta.fieldNames(T), 0..) |n, i| {
         table_columns[i] = createColumn(backend, T, n, pk_name, table_name, options);
     }
 

@@ -134,7 +134,7 @@ pub const HeaderRow = struct {
         if (comptime opts.before.len > 0) {
             try out_stream.writeAll(opts.before);
         }
-        for (self.headers) |h, i| {
+        for (self.headers, 0..) |h, i| {
             const sep = if (i == last) "" else opts.separator;
             try out_stream.print(opts.format ++ "{s}", .{ h.name, sep });
         }
@@ -153,7 +153,7 @@ pub const Row = struct {
             try out_stream.writeAll(opts.before);
         }
         const last = if (self.data.len > 0) self.data.len - 1 else 0;
-        for (self.data) |v, i| {
+        for (self.data, 0..) |v, i| {
             const sep = if (i == last) "" else opts.separator;
             switch (v) {
                 DataType.str => |value| {

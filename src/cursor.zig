@@ -97,7 +97,7 @@ pub fn Cursor(comptime backend: Backend) type {
 
             // Unpack values
             const parsed_headers = self.header_list.?.items;
-            for (parsed_headers) |h, i| {
+            for (parsed_headers, 0..) |h, i| {
                 const l = try reader.readIntBig(i32);
 
                 // TODO: Support all this switching seems like a waste

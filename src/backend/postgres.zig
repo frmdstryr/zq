@@ -672,7 +672,7 @@ pub const Protocol = struct {
                 "integer_datetimes",
                 "standard_conforming_strings",
             };
-            inline for (parameters) |name, index| {
+            inline for (parameters, 0..) |name, index| {
                 if (ascii.eqlIgnoreCase(parameter, name)) {
                     //const f = std.meta.fieldInfo(BackendParameters, name);
                     const T = @typeInfo(@TypeOf(@field(self.backend, name)));
@@ -905,19 +905,14 @@ pub fn createColumn(
                 // TODO: The rest
                 else => |v| blk: {
                     switch (@typeInfo(v)) {
-                        .Array => |info| switch(info.child) {
+                        .Array => |info| switch (info.child) {
                             u8 => break :blk comptimePrint("varchar({d})", .{info.len}),
                             else => {},
                         },
                         else => {},
                     }
-
-                    @compileError(
-                        comptimePrint("Cannot generate table column for field `{s}: {s}` of '{s}` (type {s})", .{
-                            column.field, @typeName(field_type), @typeName(T), v
-                        })
-                    );
-                }
+                    @compileError(comptimePrint("Cannot generate table column for field `{s}: {s}` of '{s}` (type {s})", .{ column.field, @typeName(field_type), @typeName(T), v }));
+                },
             },
         });
 
@@ -965,7 +960,7 @@ pub fn createTable(
     sql = sql ++ comptimePrint("CREATE TABLE {s} (\n", .{table_name});
 
     // Insert column definitions
-    inline for (columns) |col, i| {
+    inline for (columns, 0..) |col, i| {
         const sep = if (i == columns.len - 1) "" else ",";
         sql = sql ++ comptimePrint("  {s}{s}\n", .{ col.sql, sep });
     }

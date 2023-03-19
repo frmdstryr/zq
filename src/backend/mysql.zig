@@ -66,7 +66,7 @@ pub fn createTable(
     comptime var sql = comptimePrint("CREATE TABLE {s} (\n", .{table_name});
 
     // Insert column definitions
-    inline for (columns) |col, i| {
+    inline for (columns, 0..) |col, i| {
         const sep = if (i == columns.len - 1) "" else ",";
         sql = sql ++ comptimePrint("  {s}{s}\n", .{ col.sql, sep });
     }

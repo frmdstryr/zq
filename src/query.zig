@@ -129,7 +129,7 @@ const SelectQuery = struct {
             // WHERE expr=%param
             const n = self.where_clauses.len - 1;
             try out_stream.writeAll(" WHERE ");
-            for (self.where_clauses) |clause, i| {
+            for (self.where_clauses, 0..) |clause, i| {
                 try out_stream.writeAll(clause.field);
                 try out_stream.writeAll(clause.opcode());
                 try out_stream.writeAll(clause.param);
@@ -140,7 +140,7 @@ const SelectQuery = struct {
         if (self.order_by.len > 0) {
             const n = self.order_by.len - 1;
             try out_stream.writeAll(" ORDER BY ");
-            for (self.order_by) |clause, i| {
+            for (self.order_by, 0..) |clause, i| {
                 try out_stream.writeAll(clause.field);
                 if (clause.desc) try out_stream.writeAll(" DESC");
                 if (i < n) try out_stream.writeAll(", ");
@@ -215,7 +215,7 @@ pub fn InsertQuery(comptime T: type, comptime columns: []const Column) type {
             }
 
             try out_stream.writeAll("(");
-            inline for (columns) |col, i| {
+            inline for (columns, 0..) |col, i| {
                 if (!col.pk) {
                     const val = self.item.?;
                     const field_type = @typeInfo(@TypeOf(@field(val, col.field)));
