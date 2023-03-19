@@ -13,6 +13,8 @@ pub const Column = table.Column;
 //const model = @import("model.zig");
 pub const Connection = @import("connection.zig").Connection;
 pub const Engine = @import("engine.zig").Engine;
+pub const Url = @import("url.zig").Url;
+pub const Scheme = @import("backend.zig").Backend;
 
 comptime {
     std.testing.refAllDecls(@This());

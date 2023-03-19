@@ -6,6 +6,10 @@
 const std = @import("std");
 const db = @import("zq");
 const Engine = db.Engine;
+const Url = db.Url;
+const Scheme = db.Scheme;
+
+const log = std.log.scoped(.main);
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
@@ -14,7 +18,7 @@ pub fn executeRaw(comptime buffer_size: usize, conn: anytype, query: []const u8)
     var query_buffer: [buffer_size]u8 = undefined;
     var cursor = conn.execute(&query_buffer, query, .{}) catch |err| {
         if (conn.protocol.errorMessage()) |msg| {
-            std.log.err("{s}", .{msg});
+            log.err("{s}", .{msg});
         }
         return err;
     };
@@ -34,23 +38,23 @@ pub fn executeRaw(comptime buffer_size: usize, conn: anytype, query: []const u8)
             }
         },
         .running => {
-            while (try cursor.process(&row_buffer)) |msg| {
-                try stdout.print("{s}", .{msg});
-            }
+            try cursor.finish();
         },
         .complete => {
-            std.log.info("Query '{s}' complete!", .{cursor.query});
+            log.info("Query '{s}' complete!", .{cursor.query});
         },
     }
 }
 
-pub fn initTestDatabase(allocator: std.mem.Allocator) !void {
+
+
+pub fn initTestDatabase(comptime EngineType: type, allocator: std.mem.Allocator, url: Url) !void {
     // Create an "engine" that holds a pool of connections
-    var engine = Engine(.postgres).init(allocator, .{
-        .host="127.0.0.1",
-        .port=5432,
-        .user="postgres",
-        .pass="postgres",
+    var engine = EngineType.init(allocator, .{
+        .host=url.host,
+        .port=url.port,
+        .user=url.user,
+        .pass=url.pass,
         .db="",
     });
     defer engine.deinit();
@@ -61,14 +65,13 @@ pub fn initTestDatabase(allocator: std.mem.Allocator) !void {
     try executeRaw(4096, conn, "DROP DATABASE IF EXISTS test_zq;");
     try executeRaw(4096, conn, "CREATE DATABASE test_zq;");
     try executeRaw(4096, conn, "COMMIT;");
-    // try executeRaw(4096, conn, "SELECT datname FROM pg_database;");
 
 }
 
 pub const User = struct {
     id: ?u32 = null, // id defaults to the pk
     username: [100:0]u8 = undefined,
-    hashedpass: [std.crypto.pwhash.bcrypt.hash_length]u8 = undefined,
+    hashedpass: [std.crypto.pwhash.bcrypt.hash_length:0]u8 = undefined,
     email: ?[255:0]u8 = null,
 
     pub fn init(username: []const u8, password: []const u8, email: ?[]const u8) !User {
@@ -97,14 +100,14 @@ pub const User = struct {
 
 
 
-pub fn createTableCreateAndDrop(allocator: std.mem.Allocator) !void {
+pub fn createTableCreateAndDrop(comptime EngineType: type, allocator: std.mem.Allocator, url: Url) !void {
     // Create an "engine" that holds a pool of connections
-    var engine = Engine(.postgres).init(allocator, .{
-        .host="127.0.0.1",
-        .port=5432,
-        .user="postgres",
-        .pass="postgres",
-        .db="test_zq",
+    var engine = EngineType.init(allocator, .{
+        .host=url.host,
+        .port=url.port,
+        .user=url.user,
+        .pass=url.pass,
+        .db=url.database,
     });
     defer engine.deinit();
 
@@ -117,31 +120,47 @@ pub fn createTableCreateAndDrop(allocator: std.mem.Allocator) !void {
     var cursor = try conn.executeQuery(&buf, User.table.create());
     try cursor.print(stdout);
 
-    var user = try User.init("testuser", "testpass", null);
+    for ([_]User{
+        try User.init("testuser", "testpass", null),
+        try User.init("foo", "bar", null)
+    }) |user| {
+        cursor = try conn.executeQuery(&buf, User.table.insert().values(user));
+        try cursor.print(stdout);
+    }
 
-    cursor = try conn.executeQuery(&buf, User.table.insert().values(user));
-    try cursor.print(stdout);
-
+    //const q = User.table.select().limit(10);//.where(.{.username="testuser");
     const q = User.table.select().limit(10);//.where(.{.username="testuser");
     cursor = try conn.executeQuery(&buf, q);
     try cursor.print(stdout);
 
-
-    //cursor = try conn.executeQuery(&buf, UserTable.drop());
-    //std.log.debug("result: {s}", .{cursor.result});
-    //try print(4096, conn, "SELECT datname FROM pg_database;");
+    // cursor = try conn.executeQuery(&buf, User.table.drop());
+    // try cursor.print(stdout);
 }
-
-
 
 pub fn main() !void {
     defer std.debug.assert(!gpa.deinit());
     const allocator = gpa.allocator();
 
-    try initTestDatabase(allocator);
-    try createTableCreateAndDrop(allocator);
+    const db_url = std.os.getenv("DATABASE_URL") orelse {
+        log.err("DATABASE_URL is not set. Use `export=DATABASE_URL=scheme://user:pass@localhost/dbname`", .{});
+        return error.DatabaseUrlMissing;
+    };
+    const url = try Url.parse(db_url);
+    if (std.mem.indexOf(u8, url.database, "test") == null) {
+        log.err("database name of url must contain test", .{});
+        return error.DatabaseUrlInvalid;
+    }
 
+    // TODO: Better way to do this?
+    if (url.scheme == .postgres) {
+        const EngineType = Engine(.postgres);
+        try initTestDatabase(EngineType, allocator, url);
+        try createTableCreateAndDrop(EngineType, allocator, url);
+    } else {
+        log.err("database backend is not yet implemented", .{});
+        return error.NotImplemented;
+    }
 
     //try print(conn, "SELECT * FROM codelv.product;");
-    //std.log.info("{s}", .{cursor.result});
+    //log.info("{s}", .{cursor.result});
 }

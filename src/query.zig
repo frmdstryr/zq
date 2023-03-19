@@ -218,22 +218,33 @@ pub fn InsertQuery(comptime T: type, comptime columns: []const Column) type {
             inline for (columns, 0..) |col, i| {
                 if (!col.pk) {
                     const val = self.item.?;
-                    const field_type = @typeInfo(@TypeOf(@field(val, col.field)));
+                    const field_type = @TypeOf(@field(val, col.field));
+                    const type_info = @typeInfo(field_type);
 
-                    const type_info = switch (field_type) {
-                        .Optional => |info| @typeInfo(info.child),
-                        else => field_type,
-                    };
                     comptime var template: []const u8 = switch (type_info) {
-                        .Int => "{d},",
-                        else => "'{s}',",
+                        .Int, .Float => "{d},",
+                        .Optional => |info| switch (@typeInfo(info.child)) {
+                            .Int, .Float => "{?d},",
+                            else => "{?s},",
+                        },
+                        .Array, .Pointer => "'{s}',",
+                        .Bool => "{any}",
+                        else => "{s},",
                     };
-                    // TODO: NEED TO ESCAPE THIS
+                    // @compileLog(field_type);
+                    // WARNING: SECURITY ERROR: NEED TO USE BOUND QUERIES
                     const v = @field(val, col.field);
                     if (i + 1 == columns.len) {
                         template = template[0 .. template.len - 1]; // Remove comma
                     }
-                    try out_stream.print(template, .{v});
+
+                    if (comptime type_info == .Array) {
+                        // Find null termination
+                        const n = if (std.mem.indexOf(u8, &v, &[_]u8{0})) |n| n else v.len;
+                        try out_stream.print(template, .{v[0..n]});
+                    } else {
+                        try out_stream.print(template, .{v});
+                    }
                 }
             }
             try out_stream.writeAll(");");

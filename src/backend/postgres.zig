@@ -14,6 +14,11 @@ const util = @import("../util.zig");
 const Params = @import("../connection.zig").Params;
 const TableOptions = @import("../table.zig").TableOptions;
 const Column = @import("../table.zig").Column;
+const Row = @import("../row.zig").Row;
+const Header = @import("../row.zig").Header;
+const HeaderRow = @import("../row.zig").HeaderRow;
+const DataValue = @import("../row.zig").DataValue;
+const Cursor = @import("../cursor.zig").Cursor(.postgres);
 
 const COPY = @bitCast(u32, [4]u8{ 'C', 'O', 'P', 'Y' });
 const MOVE = @bitCast(u32, [4]u8{ 'M', 'O', 'V', 'E' });
@@ -22,6 +27,8 @@ const FETCH = @bitCast(u32, [4]u8{ 'F', 'E', 'T', 'C' });
 const DELETE = @bitCast(u32, [4]u8{ 'D', 'E', 'L', 'E' });
 const UPDATE = @bitCast(u32, [4]u8{ 'U', 'P', 'D', 'A' });
 const INSERT = @bitCast(u32, [4]u8{ 'I', 'N', 'S', 'E' });
+
+const log = std.log.scoped(.postgres);
 
 pub const Command = enum(u8) {
     Bind = 'B',
@@ -36,7 +43,7 @@ pub const Command = enum(u8) {
     Close = 'C',
 };
 
-// Generateed using a script for pg 14
+// Generated using a script for pg 14
 pub const ErrorCode = enum(u64) {
     unknown = 0,
     successful_completion = 0x3030303030, // 00000
@@ -313,7 +320,7 @@ pub const ErrorInfo = struct {
     ) !void {
         _ = fmt;
         _ = options;
-        try std.fmt.format(out_stream, "ErrorInfo{{ .code='{s}' .message='{s}' }}", .{ self.code, self.message });
+        try std.fmt.format(out_stream, "ErrorInfo{{ .code='{}' .message='{?s}' }}", .{ self.code, self.message });
     }
 };
 
@@ -372,6 +379,7 @@ pub const Event = enum(u8) {
 };
 
 pub const Message = struct {
+    allocator: ?mem.Allocator = null,
     data: []const u8 = "",
     len: i32 = 0,
     code: u8 = 0,
@@ -385,6 +393,16 @@ pub const Message = struct {
         _ = fmt;
         _ = options;
         try std.fmt.format(out_stream, "Message{{ .code='{c}' .len={d}, .data='{s}' }}", .{ self.code, self.len, self.data });
+    }
+
+    pub fn deinit(self: Message) void {
+        if (self.allocator) |allocator| {
+            allocator.free(self.data);
+            self.allocator = null;
+            self.data = "";
+            self.len = 0;
+            self.code = 0;
+        }
     }
 };
 
@@ -467,7 +485,7 @@ pub const Protocol = struct {
         const n = buf.pos;
         buf.pos = 0; // Update length
         try msg.writeIntBig(i32, @intCast(i32, n));
-        //std.log.debug("Startup message: {c}\n", .{buffer[0..n]});
+        //log.debug("Startup message: {c}\n", .{buffer[0..n]});
         try self.stream.writer().writeAll(buffer[0..n]);
     }
 
@@ -477,11 +495,11 @@ pub const Protocol = struct {
 
         while (true) {
             const resp = try self.readMessage(&input_buffer);
-            // std.log.debug("Read: {s}\n", .{resp});
+            // log.debug("Read: {s}\n", .{resp});
             try self.processStartupMessage(resp, &output_buffer, params);
             if (resp.code == 'Z') break; // Ready
         }
-        //std.log.info("Connected to database!", .{});
+        // log.info("Connected to database!", .{});
     }
 
     pub fn readMessage(self: Self, buffer: []u8) !Message {
@@ -493,17 +511,32 @@ pub const Protocol = struct {
         }
         const size = @intCast(usize, len - 4);
         if (size > buffer.len) {
-            return error.DatabaseMessageInvalid; // Not enough room in buffer
+            return error.DatabaseMessageTooLarge; // Not enough room in buffer
         }
         const data = buffer[0..size];
         try stream.readNoEof(data);
         return Message{ .code = code, .len = len, .data = data };
     }
 
+    pub fn readMessageAlloc(self: Self, allocator: mem.Allocator, max_size: usize) !Message {
+        const stream = self.stream.reader();
+        const code = try stream.readIntBig(u8);
+        const len = try stream.readIntBig(i32);
+        if (len < 4) {
+            return error.DatabaseMessageInvalid; // Message length bad
+        }
+        const size = @intCast(usize, len - 4);
+        if (size > max_size) {
+            return error.DatabaseMessageTooLarge; // Not enough room in buffer
+        }
+        const data = try stream.readAllAlloc(allocator, size);
+        return Message{ .code = code, .len = len, .data = data, .allocator=allocator };
+    }
+
     // Send a message already preparted
     pub fn sendCompleteMessage(self: Self, data: []const u8) !usize {
         const stream = self.stream.writer();
-        // std.log.debug("Send: {c}\n", .{data});
+        //log.debug("Send: {c}\n", .{data});
         try stream.writeAll(data);
         return data.len;
     }
@@ -516,6 +549,7 @@ pub const Protocol = struct {
         try buf.writeIntBig(i32, @intCast(i32, data.len + 5));
         try buf.writeAll(data);
         try buf.writeByte(0);
+        // log.debug("Send: {c} ({}) {c}\n", .{code, data.len+5, data});
         return self.sendCompleteMessage(fbo.getWritten());
     }
 
@@ -544,10 +578,29 @@ pub const Protocol = struct {
     pub fn handleQueryMessages(self: *Self, output_buffer: []u8) !void {
         while (true) {
             const resp = try self.readMessage(output_buffer);
-            //std.log.debug("Read: {s}", .{resp});
+            // log.debug("Read: {s}", .{resp});
             try self.processMessage(resp, output_buffer);
             if (resp.code == 'Z') break; // Ready for next query
         }
+    }
+
+    pub fn handleMessage(self: *Self, cursor: *Cursor, msg: Message) !?Message {
+        switch (msg.code) {
+            'D' => { // Row data
+                cursor.status = .rows;
+            },
+            'C' => try self.handleCommandComplete(msg),
+            'I' => try self.handleEmptyQueryResponse(msg),
+            'Z' => { // Complete / ready for next query
+                try self.handleReadyForQuery(msg);
+                cursor.status = .complete;
+                return null;
+            },
+            'N' => try self.handleNoticeResponse(msg),
+            'E' => try self.handleErrorResponse(msg), // Error see msg data
+            else => return error.DatabaseErrorResponse,
+        }
+        return msg;
     }
 
     // Process a message
@@ -576,19 +629,19 @@ pub const Protocol = struct {
         if (msg.data.len > 0) {
             self.in_transaction = msg.data[0] != 'I';
         }
-        //std.log.info("ReadyForQuery: {s}", .{msg});
+        // log.info("ReadyForQuery: {s}", .{msg});
     }
 
     pub fn handleNoticeResponse(self: *Self, msg: Message) !void {
         // N
         _ = self;
-        std.log.warn("NOTICE: {s}", .{msg.data});
+        log.warn("NOTICE: {s}", .{msg.data});
     }
 
     pub fn handleNotificationResponse(self: *Self, msg: Message) !void {
         // N
         _ = self;
-        std.log.info("NotificationResponse: {s}", .{msg});
+        log.info("NotificationResponse: {s}", .{msg});
     }
 
     pub fn handleAuthRequest(self: *Self, msg: Message, storage: []u8, params: Params) !void {
@@ -598,12 +651,12 @@ pub const Protocol = struct {
         switch (auth_type) {
             0 => {
                 // Auth success!
-                //std.log.debug("Logged in!", .{});
+                //log.debug("Logged in!", .{});
             },
             3 => {
                 // Cleartext
                 if (params.pass.len == 0) {
-                    std.log.warn("Server requested cleartext auth but no password was given", .{});
+                    log.warn("Server requested cleartext auth but no password was given", .{});
                     return error.PostgresAuthFailed;
                 }
                 _ = try self.sendMessage(storage, 'p', params.pass);
@@ -612,7 +665,7 @@ pub const Protocol = struct {
                 // MD5
                 // Specifies that an MD5-encrypted password is required.
                 if (params.pass.len == 0) {
-                    std.log.warn("Server requested MD5 auth but no password was given", .{});
+                    log.warn("Server requested MD5 auth but no password was given", .{});
                     return error.PostgresAuthFailed;
                 }
                 var fbo = std.io.fixedBufferStream(storage);
@@ -650,7 +703,7 @@ pub const Protocol = struct {
 
     // S - Identifies the message as a run-time parameter status report.
     pub fn handleParameterStatus(self: *Self, msg: Message) !void {
-        //std.log.info("ParameterStatus: {s}", .{msg});
+        //log.info("ParameterStatus: {s}", .{msg});
         if (mem.indexOfScalar(u8, msg.data, 0)) |i| {
             const parameter = msg.data[0..i];
             const j = i + 1;
@@ -691,18 +744,18 @@ pub const Protocol = struct {
                         },
                         else => @compileError("Unhandled field " ++ name),
                     }
-                    //std.log.info("Updated parameter {s}: {s}", .{parameter, value});
+                    //log.info("Updated parameter {s}: {s}", .{parameter, value});
                     return;
                 }
             }
-            std.log.warn("Unhandled parameter {s}: {s}", .{ parameter, value });
+            log.warn("Unhandled parameter {s}: {s}", .{ parameter, value });
         }
     }
 
     pub fn handleParameterDescription(self: *Self, msg: Message) !void {
         // S
         _ = self;
-        std.log.info("ParameterDesc: {s}", .{msg});
+        log.info("ParameterDesc: {s}", .{msg});
     }
 
     // K - Identifies the message as cancellation key data. The frontend must
@@ -712,33 +765,126 @@ pub const Protocol = struct {
         const reader = std.io.fixedBufferStream(msg.data).reader();
         self.backend.process_id = try reader.readIntBig(i32);
         self.backend.secret_key = try reader.readIntBig(i32);
-        // std.log.info("BackendKeyData: {s}", .{msg});
+        // log.info("BackendKeyData: {s}", .{msg});
     }
 
-    pub fn handleRowData(self: *Self, msg: Message) !void {
+    pub fn handleRowData(self: *Self, cursor: *Cursor, msg: Message, columns: []DataValue) !?Row {
         // D
         _ = self;
-        std.log.info("RowData: {s}", .{msg});
+        assert(msg.code == 'D');
+        var fbo = std.io.fixedBufferStream(msg.data);
+        const reader = fbo.reader();
+        const num_cols = std.math.absCast(try reader.readIntBig(i16));
+        if (num_cols != columns.len) {
+            return error.PostgresColumnLengthMismatch;
+        }
+
+        // Unpack values
+        const parsed_headers = cursor.header_list.?.items;
+        for (parsed_headers) |h, i| {
+            const l = try reader.readIntBig(i32);
+
+            // TODO: Support all this switching seems like a waste
+            if (l == -1) {
+                columns[i] = switch (h.data_type) {
+                    16 => DataValue{ .optional_bool = null },
+                    18 => DataValue{ .optional_u8 = null },
+                    19 => DataValue{ .optional_str = null },
+                    20 => DataValue{ .optional_i64 = null },
+                    21 => DataValue{ .optional_i16 = null },
+                    23 => DataValue{ .optional_i32 = null },
+                    25, 26, 1043 => DataValue{ .optional_str = null },
+                    28 => DataValue{ .optional_u64 = null },
+                    else => {
+                        log.err("Unsupported data type: {} {any}", .{msg, h});
+                        return error.PostgresInvalidDataType;
+                    },
+                };
+            } else if (l == 0) {
+                columns[i] = DataValue{ .optional_str = "" };
+            } else {
+                const end = fbo.pos + std.math.absCast(l);
+                const value = msg.data[fbo.pos..end];
+                //log.debug("{s}", .{value});
+                columns[i] = switch (h.data_type) {
+                    16 => DataValue{ .bool = value[0] == 't' },
+                    18 => DataValue{ .u8 = value[0] },
+                    19 => DataValue{ .str = value },
+                    20 => DataValue{ .i64 = try std.fmt.parseInt(i64, value, 10) },
+                    21 => DataValue{ .i16 = try std.fmt.parseInt(i16, value, 10) },
+                    23 => DataValue{ .i32 = try std.fmt.parseInt(i32, value, 10) },
+                    25, 26, 1043 => DataValue{ .str = value },
+                    28 => DataValue{ .u64 = try std.fmt.parseInt(u64, value, 10) },
+                    else => {
+                        log.err("Unsupported data type: {} {any}", .{msg, h});
+                        return error.PostgresInvalidDataType;
+                    },
+                };
+
+                try fbo.seekTo(end);
+            }
+        }
+        return Row{ .headers = parsed_headers, .data = columns };
     }
 
-    pub fn handleRowDesc(self: Self, msg: Message) !void {
+    pub fn handleRowDesc(self: Self, cursor: *Cursor, msg: Message) !HeaderRow {
         // T
         _ = self;
+        const allocator = cursor.internal_allocator.allocator();
         //const reader = std.io.fixedBufferStream(msg.data).reader();
         //const num_fields = try reader.readIntBig(i16);
+        // log.info("RowDesc: {s}", .{msg});
+        assert(msg.code == 'T');
+        var fbo = std.io.fixedBufferStream(msg.data);
+        const reader = fbo.reader();
+        const num_fields = try reader.readIntBig(i16);
+        // Should this be an error?
+        if (num_fields <= 0) {
+            return error.PostgresColumnLengthMismatch;
+        }
 
-        std.log.info("RowDesc: {s}", .{msg});
+        // Initialize list
+        const n = std.math.absCast(num_fields);
+        // log.debug("reading headers: {}", .{n});
+        cursor.header_list = try std.ArrayList(Header).initCapacity(allocator, n);
+        cursor.column_list = try std.ArrayList(DataValue).initCapacity(allocator, n);
+        cursor.header_list.?.expandToCapacity();
+        cursor.column_list.?.expandToCapacity();
+
+        // Parse message
+        var i: usize = 0;
+        const parsed_headers = cursor.header_list.?.items;
+        while (i < n) : (i += 1) {
+            if (std.mem.indexOfScalarPos(u8, msg.data, fbo.pos, 0)) |end| {
+                const name = msg.data[fbo.pos .. end + 1];
+                try fbo.seekTo(end + 1);
+                parsed_headers[i] = Header{
+                    .name = name,
+                    .table_id = try reader.readIntBig(i32),
+                    .attribute_number = try reader.readIntBig(i16),
+                    .data_type = try reader.readIntBig(i32),
+                    .type_len = try reader.readIntBig(i16),
+                    .type_mod = try reader.readIntBig(i32),
+                    .format_code = try reader.readIntBig(i16),
+                };
+                // log.debug("{s}", .{parsed_headers[i]});
+            } else {
+                return error.InvalidRowDescription;
+            }
+        }
+        return HeaderRow{ .headers = parsed_headers };
+
     }
 
     pub fn handleNoData(self: *Self, msg: Message) !void {
         // n
         _ = self;
-        std.log.info("NoData: {s}", .{msg});
+        log.info("NoData: {s}", .{msg});
     }
 
     pub fn handleCommandComplete(self: *Self, msg: Message) !void {
         // C
-        //std.log.info("CommandComplete: {s}", .{msg});
+        // log.info("CommandComplete: {s}", .{msg});
         if (msg.data.len < 6) return; // Bounds check
 
         // Extract row count and object id
@@ -769,37 +915,37 @@ pub const Protocol = struct {
     pub fn handleParseComplete(self: *Self, msg: Message) !void {
         // 1
         _ = self;
-        std.log.info("ParseComplete: {s}", .{msg});
+        log.info("ParseComplete: {s}", .{msg});
     }
 
     pub fn handleBindComplete(self: *Self, msg: Message) !void {
         // 2
         _ = self;
-        std.log.info("BindComplete: {s}", .{msg});
+        log.info("BindComplete: {s}", .{msg});
     }
 
     pub fn handleCloseComplete(self: *Self, msg: Message) !void {
         // 3
         _ = self;
-        std.log.info("CloseComplete: {s}", .{msg});
+        log.info("CloseComplete: {s}", .{msg});
     }
 
     pub fn handleSuspended(self: *Self, msg: Message) !void {
         // s
         _ = self;
-        std.log.info("Suspended: {s}", .{msg});
+        log.info("Suspended: {s}", .{msg});
     }
 
     pub fn handleCopyDone(self: *Self, msg: Message) !void {
         // s
         _ = self;
-        std.log.info("CopyDone: {s}", .{msg});
+        log.info("CopyDone: {s}", .{msg});
     }
 
     pub fn handleCopyData(self: *Self, msg: Message) !void {
         // s
         _ = self;
-        std.log.info("CopyData: {s}", .{msg});
+        log.info("CopyData: {s}", .{msg});
     }
 
     pub fn handleEmptyQueryResponse(self: *Self, msg: Message) !void {
@@ -840,12 +986,12 @@ pub const Protocol = struct {
             }
         }
 
-        std.log.err("{} - {s}", .{ code, error_message });
         // Save error info
         self.error_info = ErrorInfo{
             .code = code,
             .message = error_message,
         };
+        log.err("{}", .{ self.error_info.?});
         return switch (code) {
             .invalid_catalog_name => error.DatabaseDoesNotExist,
             .undefined_table => error.TableDoesNotExist,
@@ -885,19 +1031,18 @@ pub fn createColumn(
     comptime field_type: type,
 ) []const u8 {
     comptime {
+        _ = table_name;
         var sql: []const u8 = comptimePrint("{s} {s}", .{
             column.name,
             switch (field_type) {
                 bool => "bool",
                 u8 => "char",
-                i16 => "int2",
-                i32 => "int4",
-                i64 => "int8",
-                i8 => "integer",
-                f32 => "float4",
-                f64 => "float8",
-                u16 => "int4",
-                u32 => "int8",
+                i8 => "smallint",
+                i16, u16 => "smallint",
+                i32, u32 => if (column.pk or column.autoincrement) "serial" else "integer",
+                i64, u64 => if (column.pk or column.autoincrement) "bigserial" else "bigint",
+                f32 => "real",
+                f64 => "double precision",
                 []u8, []const u8 => if (column.len > 0)
                     comptimePrint("varchar({d})", .{column.len})
                 else
@@ -918,12 +1063,6 @@ pub fn createColumn(
 
         if (column.pk) {
             sql = sql ++ " PRIMARY KEY";
-            if (column.autoincrement) {
-                sql = sql ++ comptimePrint(" DEFAULT nextval('{s}_{s}_seq')", .{
-                    table_name,
-                    column.name,
-                });
-            }
         } else {
             if (!column.optional) {
                 sql = sql ++ " NOT NULL";
@@ -932,8 +1071,25 @@ pub fn createColumn(
                 sql = sql ++ " UNIQUE";
             }
             if (column.default) |v| {
-                //@compileLog(v);
-                sql = sql ++ comptimePrint(" DEFAULT {s}", .{v});
+                switch (@typeInfo(field_type)) {
+                    .Array, .Pointer => {
+                        if (std.mem.eql(u8, v, "null") or v.len == 0) {
+                            sql = sql ++ " DEFAULT NULL";
+                        } else {
+                            // TODO: Detect undefined without save mode?
+                            //@compileLog(v.ptr);
+//                             if (v.len != column.len) {
+//                                 sql = sql ++ comptimePrint(" DEFAULT '{s}'", .{v});
+//                             }
+                        }
+                    },
+                    .Bool, .Float, .Int => {
+                        sql = sql ++ comptimePrint(" DEFAULT {s}", .{v});
+                    },
+                    else => @compileError(comptimePrint("Default not yet supported for {}",
+                        .{@TypeOf(v)}
+                    )),
+                }
             }
         }
         return sql;
@@ -946,15 +1102,6 @@ pub fn createTable(
     comptime options: TableOptions,
 ) []const u8 {
     comptime var sql: []const u8 = "";
-
-    // Create sequence for any auto increment fields
-    inline for (columns) |col| {
-        if (col.autoincrement) {
-            sql = sql ++ comptimePrint("CREATE SEQUENCE {s}_{s}_seq;\n", .{
-                table_name, col.name,
-            });
-        }
-    }
 
     // Same for all
     sql = sql ++ comptimePrint("CREATE TABLE {s} (\n", .{table_name});
@@ -979,14 +1126,6 @@ pub fn createTable(
     }
 
     sql = sql ++ ");\n";
-    inline for (columns) |col| {
-        if (col.autoincrement) {
-            sql = sql ++ comptimePrint("ALTER SEQUENCE {s}_{s}_seq OWNED BY {s}.{s};\n", .{
-                table_name, col.name,
-                table_name, col.name,
-            });
-        }
-    }
     return sql[0 .. sql.len - 1]; // Strip last newline
 
 }

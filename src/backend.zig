@@ -3,6 +3,7 @@
 // Distributed under the terms of the MIT License.                            //
 // The full license is in the file LICENSE, distributed with this software.   //
 // -------------------------------------------------------------------------- //
+const Engine = @import("engine.zig").Engine;
 
 pub const Backend = enum {
     postgres,
@@ -32,4 +33,13 @@ pub const Backend = enum {
             .sqlite => @import("backend/sqlite.zig").Message,
         };
     }
+
+    pub fn defaultPort(self: Backend) u16 {
+        return switch (self) {
+            .postgres => 5432,
+            .mysql => 3306,
+            .sqlite => 0,
+        };
+    }
+
 };
